@@ -1,0 +1,16 @@
+[Unit]
+Description=Bot Telegram Service
+After=network.target
+
+[Service]
+Type=simple
+User=bastian.alveal
+WorkingDirectory=/home/bastian.alveal/Desktop/telegram_bot
+ExecStart=/home/bastian.alveal/Desktop/telegram_bot/venv/bin/python3 main.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/bot-telegram.log
+StandardError=append:/var/log/bot-telegram.error.log
+
+[Install]
+WantedBy=multi-user.target
