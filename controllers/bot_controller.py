@@ -1,7 +1,8 @@
-from telegram import Update, error as telegram_error
-from telegram.ext import ContextTypes
+from telegram import Update, error as telegram_error, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes, CallbackQueryHandler
 from models.command_executor import CommandExecutor
 from models.system_info import SystemInfo
+from models.alert_system import AlertSystem
 from utils.logger import logger
 from config.config import TELEGRAM_GROUP
 from functools import wraps
@@ -16,9 +17,12 @@ class BotController:
     def __init__(self):
         self.command_executor = CommandExecutor()
         self.system_info = SystemInfo()
+        self.alert_system = AlertSystem()
         self.modo_terminal = False
         self.max_retries = 3
         self.welcome_sent = False
+        self._bot = None
+        self._alert_check_task = None
         
     async def send_welcome_message(self, bot):
         """Envía mensaje de bienvenida al iniciar el bot"""
@@ -73,6 +77,10 @@ class BotController:
             
             if not TELEGRAM_GROUP or user_id != TELEGRAM_GROUP:
                 logger.warning(f"Acceso denegado - Usuario: {username} (ID: {user_id})")
+                # Generar alerta de seguridad
+                alert = self.alert_system.check_unauthorized_access(user_id, username)
+                if alert:
+                    await self._send_alert(context.bot, alert)
                 await self.send_message_with_retry(update.message, "Acceso denegado")
                 return
             
@@ -128,7 +136,9 @@ class BotController:
             "/info - 📋 Información del sistema\n"
             "/ps - 📈 Lista de procesos activos\n"
             "/net - 🌐 Estado de la red\n"
-            "/disk - 💾 Uso detallado del disco"
+            "/disk - 💾 Uso detallado del disco\n\n"
+            "⚙️ *Configuración de Alertas:*\n"
+            "/alerts - 🔔 Gestionar alertas del sistema"
         )
         await update.message.reply_text(help_text, parse_mode='Markdown')
 
@@ -190,6 +200,182 @@ class BotController:
             return
 
         user_id = update.effective_user.id
+        username = update.effective_user.username or "Sin username"
+        comando = update.message.text.strip()
+        
+        logger.info(f"Comando recibido de {username} (ID: {user_id}): {comando}")
+        
+        try:
+            espera_message = await self.send_message_with_retry(
+                update.message,
+                "⏳ Ejecutando comando..."
+            )
+            
+            output = await self.command_executor.execute_command(comando)
+            await espera_message.delete()
+            
+            if output:
+                await self.send_message_with_retry(update.message, f"`{output}`", parse_mode='Markdown')
+            else:
+                await self.send_message_with_retry(update.message, "✅ Comando ejecutado sin salida")
+                
+        except Exception as e:
+            logger.error(f"Error ejecutando comando: {e}")
+            await self.send_message_with_retry(
+                update.message,
+                f"❌ Error: {str(e)}"
+            )
+
+    async def setup_alert_check(self, bot):
+        """Configura el bucle de verificación de alertas del sistema"""
+        self._bot = bot
+        if self._alert_check_task is None:
+            self._alert_check_task = asyncio.create_task(self._alert_check_loop())
+
+    async def _alert_check_loop(self):
+        """Bucle principal para verificar alertas del sistema"""
+        while True:
+            try:
+                alert = self.alert_system.check_system_resources()
+                if alert:
+                    await self._send_alert(self._bot, alert)
+            except Exception as e:
+                logger.error(f"Error en verificación de alertas: {e}")
+            await asyncio.sleep(60)  # Verificar cada minuto
+
+    async def _send_alert(self, bot, alert):
+        """Envía una alerta al grupo de Telegram"""
+        if not TELEGRAM_GROUP:
+            return
+
+        emoji_map = {
+            'info': 'ℹ️',
+            'warning': '⚠️',
+            'danger': '🚨'
+        }
+
+        alert_text = (
+            f"{emoji_map.get(alert.severity, '❗')} *{alert.type.upper()}*\n"
+            f"{alert.message}\n"
+            f"📅 `{alert.timestamp.strftime('%Y-%m-%d %H:%M:%S')}`"
+        )
+
+        try:
+            await bot.send_message(
+                chat_id=TELEGRAM_GROUP,
+                text=alert_text,
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Error enviando alerta: {e}")
+
+    @validate_access
+    async def alerts(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Maneja la configuración de alertas"""
+        keyboard = [
+            [InlineKeyboardButton("🔒 Seguridad", callback_data="alert_security")],
+            [InlineKeyboardButton("💻 CPU", callback_data="alert_cpu")],
+            [InlineKeyboardButton("💾 Memoria", callback_data="alert_memory")],
+            [InlineKeyboardButton("💿 Disco", callback_data="alert_disk")],
+            [InlineKeyboardButton("⚙️ Umbrales", callback_data="alert_thresholds")]
+        ]
+
+        alert_status = self.alert_system.get_alert_status()
+        status_text = "🔔 *Estado Actual de Alertas*\n\n"
+        for alert_type, enabled in alert_status.items():
+            status = "✅ Activada" if enabled else "❌ Desactivada"
+            status_text += f"• {alert_type.title()}: {status}\n"
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            status_text,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+    async def handle_alert_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Maneja las interacciones con los botones de configuración de alertas"""
+        query = update.callback_query
+        await query.answer()
+
+        if not query.data.startswith("alert_"):
+            return
+
+        alert_type = query.data.replace("alert_", "")
+        if alert_type == "thresholds":
+            thresholds_text = (
+                "⚙️ *Configuración de Umbrales*\n\n"
+                "Para configurar un umbral, usa:\n"
+                "`/threshold <recurso> <valor>`\n\n"
+                "Ejemplo:\n"
+                "`/threshold cpu 90`\n\n"
+                "Recursos disponibles:\n"
+                "• cpu\n"
+                "• memory\n"
+                "• disk"
+            )
+            await query.edit_message_text(
+                text=thresholds_text,
+                parse_mode='Markdown'
+            )
+            return
+
+        # Toggle alert status
+        current_status = self.alert_system.get_alert_status()[alert_type]
+        new_status = not current_status
+        self.alert_system.toggle_alert(alert_type, new_status)
+
+        # Update message
+        alert_status = self.alert_system.get_alert_status()
+        status_text = "🔔 *Estado Actual de Alertas*\n\n"
+        for a_type, enabled in alert_status.items():
+            status = "✅ Activada" if enabled else "❌ Desactivada"
+            status_text += f"• {a_type.title()}: {status}\n"
+
+        keyboard = [
+            [InlineKeyboardButton("🔒 Seguridad", callback_data="alert_security")],
+            [InlineKeyboardButton("💻 CPU", callback_data="alert_cpu")],
+            [InlineKeyboardButton("💾 Memoria", callback_data="alert_memory")],
+            [InlineKeyboardButton("💿 Disco", callback_data="alert_disk")],
+            [InlineKeyboardButton("⚙️ Umbrales", callback_data="alert_thresholds")]
+        ]
+
+        await query.edit_message_text(
+            text=status_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+
+    @validate_access
+    async def threshold(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Configura los umbrales de las alertas"""
+        args = context.args
+        if len(args) != 2:
+            await update.message.reply_text(
+                "❌ Uso incorrecto. Ejemplo:\n"
+                "`/threshold cpu 90`",
+                parse_mode='Markdown'
+            )
+            return
+
+        resource, value = args
+        try:
+            value = float(value)
+            if self.alert_system.set_threshold(resource, value):
+                await update.message.reply_text(
+                    f"✅ Umbral de {resource} actualizado a {value}%",
+                    parse_mode='Markdown'
+                )
+            else:
+                await update.message.reply_text(
+                    "❌ Recurso no válido o valor fuera de rango (0-100)",
+                    parse_mode='Markdown'
+                )
+        except ValueError:
+            await update.message.reply_text(
+                "❌ El valor debe ser un número",
+                parse_mode='Markdown'
+            )
         username = update.effective_user.username or "Sin username"
         comando = update.message.text.strip()
         

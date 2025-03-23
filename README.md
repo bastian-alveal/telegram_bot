@@ -8,6 +8,11 @@ Este bot de Telegram proporciona funcionalidades para monitorear y controlar un 
 - Información de red
 - Lista de procesos activos
 - Ejecución de comandos remotos (modo terminal)
+- Sistema de alertas configurable
+  - Alertas de seguridad para accesos no autorizados
+  - Alertas de rendimiento (CPU, memoria, disco)
+  - Umbrales configurables
+  - Activación/desactivación individual de alertas
 - Interfaz de usuario amigable con comandos intuitivos
 
 ## Requisitos Previos
@@ -69,6 +74,7 @@ sudo systemctl start bot-telegram
 
 ## Comandos Disponibles
 
+### Comandos Básicos
 - `/start` - Inicia el bot y muestra el menú principal
 - `/info` - Muestra información del sistema
 - `/ps` - Lista los procesos activos
@@ -76,6 +82,13 @@ sudo systemctl start bot-telegram
 - `/disk` - Muestra información del disco
 - `/run` - Activa el modo terminal
 - `/exit` - Desactiva el modo terminal
+
+### Comandos de Alertas
+- `/alerts` - Muestra el panel de control de alertas
+- `/threshold <recurso> <valor>` - Configura el umbral de alerta para un recurso
+  - Recursos disponibles: `cpu`, `memory`, `disk`
+  - Valor: porcentaje entre 0 y 100
+  - Ejemplo: `/threshold cpu 90`
 
 ## Estructura del Proyecto
 
@@ -87,7 +100,8 @@ telegram_bot/
 │   └── bot_controller.py # Controlador principal del bot
 ├── models/
 │   ├── command_executor.py # Ejecutor de comandos
-│   └── system_info.py    # Modelo para información del sistema
+│   ├── system_info.py    # Modelo para información del sistema
+│   └── alert_system.py   # Sistema de alertas y monitoreo
 ├── utils/
 │   └── logger.py         # Configuración de logging
 ├── views/
@@ -96,6 +110,35 @@ telegram_bot/
 ├── requirements.txt     # Dependencias del proyecto
 └── README.md           # Esta documentación
 ```
+
+## Sistema de Alertas
+
+El bot incluye un sistema de alertas configurable que monitorea:
+
+1. **Seguridad**
+   - Detecta intentos de acceso no autorizados
+   - Registra ID y username del usuario
+
+2. **Rendimiento**
+   - CPU: Alerta cuando el uso supera el umbral configurado
+   - Memoria: Alerta cuando el uso supera el umbral configurado
+   - Disco: Alerta cuando el uso supera el umbral configurado
+
+### Configuración
+
+- Usa `/alerts` para acceder al panel de control
+- Activa/desactiva alertas individualmente
+- Configura umbrales personalizados con `/threshold`
+- Las alertas tienen un tiempo de enfriamiento de 5 minutos
+
+### Personalización
+
+Para agregar nuevas alertas:
+
+1. Define la alerta en `models/alert_system.py`
+2. Agrega la lógica de detección
+3. Registra el tipo de alerta en `AlertSystem.__init__`
+4. Actualiza el panel de control en `BotController.alerts`
 
 ## Monitoreo y Logs
 
