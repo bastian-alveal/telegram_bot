@@ -14,6 +14,7 @@ Este bot de Telegram proporciona funcionalidades para monitorear y controlar un 
 
 - Python 3.8 o superior
 - Token de Bot de Telegram (obtenido a través de @BotFather)
+- User_ID de Telegram (obtenido a través de @get_id_bot)
 - Permisos de administrador en el sistema
 
 ## Instalación
@@ -21,7 +22,7 @@ Este bot de Telegram proporciona funcionalidades para monitorear y controlar un 
 1. Clonar o copiar el repositorio:
 ```bash
 cd ~/Desktop
-git clone <repositorio> telegram_bot
+git clone https://github.com/bastian-alveal/telegram_bot.git
 cd telegram_bot
 ```
 
