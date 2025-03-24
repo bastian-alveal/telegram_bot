@@ -87,6 +87,12 @@ def main():
         application.add_handler(CommandHandler("threshold", bot_controller.threshold))
         application.add_handler(CallbackQueryHandler(bot_controller.handle_alert_callback))
         
+        # Registrar comandos de gestión de usuarios
+        application.add_handler(CommandHandler("users", bot_controller.users))
+        application.add_handler(CommandHandler("add_user", bot_controller.add_user))
+        application.add_handler(CommandHandler("remove_user", bot_controller.remove_user))
+        application.add_handler(CommandHandler("set_role", bot_controller.set_role))
+        
         # Manejador de mensajes para comandos de terminal
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot_controller.handle_message))
 

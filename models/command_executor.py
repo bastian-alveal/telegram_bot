@@ -1,6 +1,7 @@
 import subprocess
 import shlex
 import os
+import asyncio
 from utils.logger import logger
 from config.config import BLACKLIST_COMMANDS
 
@@ -8,7 +9,7 @@ class CommandExecutor:
     def __init__(self):
         self.current_directory = os.getcwd()
 
-    def execute_command(self, command: str) -> tuple:
+    async def execute_command(self, command: str) -> tuple[str | None, str | None]:
         """
         Ejecuta un comando y retorna el resultado y el estado
         """
@@ -20,24 +21,28 @@ class CommandExecutor:
 
             # Manejar comando cd
             if command.startswith("cd "):
-                return self._change_directory(command[3:].strip())
+                return await self._change_directory(command[3:].strip())
 
             # Ejecutar comando normal
             cmd_tokens = shlex.split(command)
-            result = subprocess.check_output(
-                cmd_tokens,
-                stderr=subprocess.STDOUT,
-                text=True,
+            process = await asyncio.create_subprocess_exec(
+                *cmd_tokens,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 cwd=self.current_directory
             )
-            return result, None
 
-        except subprocess.CalledProcessError as e:
-            return None, f"Error ejecutando comando: {e.output}"
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode != 0:
+                return None, stderr.decode() if stderr else "Error ejecutando comando"
+                
+            return stdout.decode() if stdout else "", None
+
         except Exception as e:
             return None, f"Error: {str(e)}"
 
-    def _change_directory(self, new_dir: str) -> tuple:
+    async def _change_directory(self, new_dir: str) -> tuple[str | None, str | None]:
         """
         Cambia el directorio actual
         """

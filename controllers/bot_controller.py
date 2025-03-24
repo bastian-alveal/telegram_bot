@@ -3,6 +3,7 @@ from telegram.ext import ContextTypes, CallbackQueryHandler
 from models.command_executor import CommandExecutor
 from models.system_info import SystemInfo
 from models.alert_system import AlertSystem
+from models.user_manager import UserManager, UserRole
 from utils.logger import logger
 from config.config import TELEGRAM_GROUP
 from functools import wraps
@@ -18,11 +19,32 @@ class BotController:
         self.command_executor = CommandExecutor()
         self.system_info = SystemInfo()
         self.alert_system = AlertSystem()
+        self.user_manager = UserManager()
         self.modo_terminal = False
         self.max_retries = 3
         self.welcome_sent = False
         self._bot = None
         self._alert_check_task = None
+        self._owner_id = None
+        
+    async def notify_owner(self, message: str):
+        """Notifica al owner sobre eventos importantes"""
+        try:
+            if not self._owner_id:
+                # Buscar al owner en la lista de usuarios
+                users = self.user_manager.list_users()
+                owner = next((user for user in users if user['role'].lower() == 'owner'), None)
+                if owner:
+                    self._owner_id = owner['id']
+            
+            if self._owner_id:
+                await self._bot.send_message(
+                    chat_id=self._owner_id,
+                    text=message,
+                    parse_mode='Markdown'
+                )
+        except Exception as e:
+            logger.error(f"Error notificando al owner: {e}")
         
     async def send_welcome_message(self, bot):
         """Envía mensaje de bienvenida al iniciar el bot"""
@@ -75,7 +97,9 @@ class BotController:
             user_id = str(update.effective_user.id)
             username = update.effective_user.username or "Sin username"
             
-            if not TELEGRAM_GROUP or user_id != TELEGRAM_GROUP:
+            # Verificar si el usuario está registrado
+            permissions = self.user_manager.get_user_permissions(user_id)
+            if not permissions:
                 logger.warning(f"Acceso denegado - Usuario: {username} (ID: {user_id})")
                 # Generar alerta de seguridad
                 alert = self.alert_system.check_unauthorized_access(user_id, username)
@@ -83,6 +107,31 @@ class BotController:
                     await self._send_alert(context.bot, alert)
                 await self.send_message_with_retry(update.message, "Acceso denegado")
                 return
+            
+            # Verificar permisos específicos
+            command = func.__name__
+            if command in ['run_commands', 'handle_message'] and not permissions.can_execute_commands:
+                await self.send_message_with_retry(update.message, "❌ No tienes permiso para ejecutar comandos")
+                return
+            elif command.startswith('add_user') and not permissions.can_manage_users:
+                await self.send_message_with_retry(update.message, "❌ No tienes permiso para gestionar usuarios")
+                return
+            elif command.startswith('alert') and not permissions.can_manage_alerts:
+                await self.send_message_with_retry(update.message, "❌ No tienes permiso para gestionar alertas")
+                return
+            
+            # Notificar al owner si el comando es ejecutado por otro usuario
+            user_role = self.user_manager.get_user_role(user_id)
+            if user_role != UserRole.OWNER and command not in ['users', 'help', 'start']:
+                # Obtener el username desde el registro de usuarios
+                users = self.user_manager.list_users()
+                user = next((u for u in users if u['id'] == user_id), None)
+                notify_username = user['username'] if user else username
+                
+                await self.notify_owner(
+                    f"💻 *Comando:* `{update.message.text}`\n"
+                    f"Por: `{notify_username}` ({user_role.value})"
+                )
             
             logger.info(f"Comando ejecutado por admin {username} (ID: {user_id})")
             
@@ -127,19 +176,37 @@ class BotController:
 
     @validate_access
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        help_text = (
-            "🤖 *Bot - Comandos Disponibles*\n\n"
-            "\n📌 *Comandos de Terminal:*\n"
-            "/run - 🖥️ Activar modo terminal\n"
-            "/exit - ⛔ Desactivar modo terminal\n\n"
-            "📊 *Comandos de Monitoreo:*\n"
-            "/info - 📋 Información del sistema\n"
-            "/ps - 📈 Lista de procesos activos\n"
-            "/net - 🌐 Estado de la red\n"
-            "/disk - 💾 Uso detallado del disco\n\n"
-            "⚙️ *Configuración de Alertas:*\n"
-            "/alerts - 🔔 Gestionar alertas del sistema"
-        )
+        user_id = str(update.effective_user.id)
+        permissions = self.user_manager.get_user_permissions(user_id)
+        
+        help_text = "🤖 *Bot - Comandos Disponibles*\n\n"
+        
+        # Comandos de monitoreo (disponibles para todos)
+        help_text += "📊 *Comandos de Monitoreo:*\n"
+        help_text += "/info - Información del sistema\n"
+        help_text += "/ps - Lista de procesos activos\n"
+        help_text += "/net - Estado de la red\n"
+        help_text += "/disk - Uso detallado del disco\n\n"
+        
+        # Comandos de terminal (solo para usuarios con permiso)
+        if permissions.can_execute_commands:
+            help_text += "📌 *Comandos de Terminal:*\n"
+            help_text += "/run - Activar modo terminal\n"
+            help_text += "/exit - Desactivar modo terminal\n\n"
+        
+        # Comandos de alertas (solo para usuarios con permiso)
+        if permissions.can_manage_alerts:
+            help_text += "⚙️ *Configuración de Alertas:*\n"
+            help_text += "/alerts - Gestionar alertas del sistema\n\n"
+        
+        # Comandos de gestión de usuarios (solo para OWNER)
+        if permissions.can_manage_users:
+            help_text += "👤 *Gestión de Usuarios:*\n"
+            help_text += "/users - Listar usuarios\n"
+            help_text += "/add_user - Agregar usuario\n"
+            help_text += "/remove_user - Eliminar usuario\n"
+            help_text += "/set_role - Cambiar rol de usuario"
+        
         await update.message.reply_text(help_text, parse_mode='Markdown')
 
     @validate_access
@@ -191,6 +258,24 @@ class BotController:
 
     @validate_access
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        username = update.effective_user.username or "Sin username"
+        comando = update.message.text.strip()
+
+        # Verificar si es un comando del bot
+        if comando.startswith('/'):
+            if not self.modo_terminal:
+                # Procesar normalmente a través del manejador de comandos del bot
+                return
+            else:
+                # En modo terminal, no permitir comandos del bot
+                await update.message.reply_text(
+                    "❌ Los comandos del bot no se pueden ejecutar en modo terminal.",
+                    parse_mode='Markdown'
+                )
+                return
+
+        # Si no estamos en modo terminal y no es un comando, pedir activar el modo
         if not self.modo_terminal:
             await self.send_message_with_retry(
                 update.message,
@@ -198,26 +283,58 @@ class BotController:
                 parse_mode='Markdown'
             )
             return
-
-        user_id = update.effective_user.id
-        username = update.effective_user.username or "Sin username"
-        comando = update.message.text.strip()
-        
+            
         logger.info(f"Comando recibido de {username} (ID: {user_id}): {comando}")
         
         try:
+            # Obtener el username desde el registro de usuarios
+            users = self.user_manager.list_users()
+            user = next((u for u in users if u['id'] == str(user_id)), None)
+            notify_username = user['username'] if user else username
+            
+            # Notificar al owner sobre el comando
+            await self.notify_owner(f"💻 `{notify_username}` ejecutó: `{comando}`")
+            
             espera_message = await self.send_message_with_retry(
                 update.message,
                 "⏳ Ejecutando comando..."
             )
             
-            output = await self.command_executor.execute_command(comando)
+            output, error = await self.command_executor.execute_command(comando)
             await espera_message.delete()
             
+            if error:
+                await self.send_message_with_retry(
+                    update.message,
+                    f"❌ Error: {error}",
+                    parse_mode='Markdown'
+                )
+                # Notificar al owner sobre el error
+                await self.notify_owner(f"❌ Error en comando de `{notify_username}`: {error}")
+                return
+            
             if output:
-                await self.send_message_with_retry(update.message, f"`{output}`", parse_mode='Markdown')
+                # Dividir la salida en chunks si es muy larga
+                max_length = 4000  # Límite de Telegram para mensajes
+                chunks = [output[i:i + max_length] for i in range(0, len(output), max_length)]
+                
+                for chunk in chunks:
+                    # Escapar caracteres especiales de Markdown
+                    chunk = chunk.replace('`', '\\`')
+                    await self.send_message_with_retry(
+                        update.message,
+                        f"`{chunk}`",
+                        parse_mode='Markdown'
+                    )
+                    
+                # Notificar al owner sobre el resultado
+                await self.notify_owner(f"✅ Comando completado por `{notify_username}`")
             else:
-                await self.send_message_with_retry(update.message, "✅ Comando ejecutado sin salida")
+                await self.send_message_with_retry(
+                    update.message,
+                    "✅ Comando ejecutado con éxito",
+                    parse_mode='Markdown'
+                )
                 
         except Exception as e:
             logger.error(f"Error ejecutando comando: {e}")
@@ -376,6 +493,155 @@ class BotController:
                 "❌ El valor debe ser un número",
                 parse_mode='Markdown'
             )
+
+    @validate_access
+    async def users(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Lista todos los usuarios registrados"""
+        users = self.user_manager.list_users()
+        if not users:
+            await update.message.reply_text(
+                "ℹ️ No hay usuarios registrados",
+                parse_mode='Markdown'
+            )
+            return
+
+        message = "📊 *Usuarios Registrados*\n\n"
+        for user in users:
+            role_emoji = {
+                'owner': '👑',  # Corona
+                'admin': '🛡️',  # Escudo
+                'monitor': '🔍'  # Lupa
+            }.get(user['role'], '❓')
+            
+            message += f"{role_emoji} *{user['username']}*\n"
+            message += f"  • ID: `{user['id']}`\n"
+            message += f"  • Rol: `{user['role']}`\n\n"
+
+        await update.message.reply_text(message, parse_mode='Markdown')
+
+    @validate_access
+    async def add_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Agrega un nuevo usuario"""
+        args = context.args
+        if len(args) != 3:
+            await update.message.reply_text(
+                "❌ Uso incorrecto. Ejemplo:\n"
+                "`/add_user <user_id> <username> <rol>`\n\n"
+                "Roles disponibles:\n"
+                "• admin - Acceso total excepto gestión de usuarios\n"
+                "• monitor - Solo monitoreo y alertas",
+                parse_mode='Markdown'
+            )
+            return
+
+        user_id, username, role = args
+        try:
+            role = UserRole(role.lower())
+            if role == UserRole.OWNER:
+                await update.message.reply_text(
+                    "❌ No se puede crear un usuario con rol OWNER",
+                    parse_mode='Markdown'
+                )
+                return
+
+            if self.user_manager.add_user(user_id, username, role):
+                await update.message.reply_text(
+                    f"✅ Usuario agregado exitosamente:\n"
+                    f"ID: `{user_id}`\n"
+                    f"Username: `{username}`\n"
+                    f"Rol: `{role.value}`",
+                    parse_mode='Markdown'
+                )
+            else:
+                await update.message.reply_text(
+                    "❌ Error al agregar usuario",
+                    parse_mode='Markdown'
+                )
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Rol no válido",
+                parse_mode='Markdown'
+            )
+
+    @validate_access
+    async def remove_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Elimina un usuario"""
+        args = context.args
+        if len(args) != 1:
+            await update.message.reply_text(
+                "❌ Uso incorrecto. Ejemplo:\n"
+                "`/remove_user <user_id>`",
+                parse_mode='Markdown'
+            )
+            return
+
+        user_id = args[0]
+        if self.user_manager.remove_user(user_id):
+            await update.message.reply_text(
+                f"✅ Usuario eliminado exitosamente",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Error al eliminar usuario (no existe o es OWNER)",
+                parse_mode='Markdown'
+            )
+
+    @validate_access
+    async def set_role(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Cambia el rol de un usuario"""
+        args = context.args
+        if len(args) != 2:
+            await update.message.reply_text(
+                "❌ Uso incorrecto. Ejemplo:\n"
+                "`/set_role <user_id> <nuevo_rol>`\n\n"
+                "Roles disponibles:\n"
+                "• admin - Acceso total excepto gestión de usuarios\n"
+                "• monitor - Solo monitoreo y alertas",
+                parse_mode='Markdown'
+            )
+            return
+
+        user_id, new_role = args
+        try:
+            role = UserRole(new_role.lower())
+            if role == UserRole.OWNER:
+                await update.message.reply_text(
+                    "❌ No se puede asignar el rol OWNER",
+                    parse_mode='Markdown'
+                )
+                return
+
+            if self.user_manager.update_user_role(user_id, role):
+                # Obtener el username del usuario afectado
+                target_user = next((u for u in self.user_manager.list_users() if u['id'] == user_id), None)
+                target_username = target_user['username'] if target_user else user_id
+                
+                success_msg = (f"✅ Rol actualizado exitosamente:\n"
+                             f"ID: `{user_id}`\n"
+                             f"Usuario: `{target_username}`\n"
+                             f"Nuevo rol: `{role.value}`")
+                
+                await update.message.reply_text(success_msg, parse_mode='Markdown')
+                
+                # Notificar al owner
+                admin_username = update.effective_user.username or "Sin username"
+                await self.notify_owner(
+                    f"👤 *Cambio de Rol*\n"
+                    f"Admin: `{admin_username}`\n"
+                    f"Usuario: `{target_username}`\n"
+                    f"Nuevo rol: `{role.value}`"
+                )
+            else:
+                await update.message.reply_text(
+                    "❌ Error al actualizar rol (usuario no existe o es OWNER)",
+                    parse_mode='Markdown'
+                )
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Rol no válido",
+                parse_mode='Markdown'
+            )
         username = update.effective_user.username or "Sin username"
         comando = update.message.text.strip()
         
@@ -387,7 +653,7 @@ class BotController:
                 "⏳ Ejecutando comando..."
             )
 
-            result, error = self.command_executor.execute_command(comando)
+            result, error = await self.command_executor.execute_command(comando)
             
             if error:
                 logger.error(f"Error ejecutando comando de {username}: {error}")
