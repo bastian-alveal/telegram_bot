@@ -1,4 +1,4 @@
-# Bot de Telegram para Monitoreo de Sistema
+# Bot de Telegram para Monitoreo de Sistema OS Raspberry
 
 Este bot de Telegram proporciona funcionalidades para monitorear y controlar un sistema Linux remotamente a través de Telegram.
 
