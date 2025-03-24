@@ -3,3 +3,6 @@ venv/
 
 # Ignorar archivo de variables de entorno
 .env
+
+# Ignorar el archivo json de usuarios
+config/users.json
